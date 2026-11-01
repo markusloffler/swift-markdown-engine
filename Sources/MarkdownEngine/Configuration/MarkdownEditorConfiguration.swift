@@ -706,6 +706,8 @@ public struct BlockquoteStyle: Sendable {
     public var barWidth: CGFloat
     /// Bar color; nil (default) uses `theme.mutedText` at 50 % alpha.
     public var barColor: NSColor?
+    /// Quote text color; nil (default) uses `theme.mutedText`.
+    public var textColor: NSColor?
 
     public init(
         extraLineHeight: CGFloat = 0,
@@ -713,7 +715,8 @@ public struct BlockquoteStyle: Sendable {
         barOffset: CGFloat? = nil,
         textOffset: CGFloat? = nil,
         barWidth: CGFloat = 3,
-        barColor: NSColor? = nil
+        barColor: NSColor? = nil,
+        textColor: NSColor? = nil
     ) {
         self.extraLineHeight = extraLineHeight
         self.indentPerLevel = indentPerLevel
@@ -721,10 +724,12 @@ public struct BlockquoteStyle: Sendable {
         self.textOffset = textOffset
         self.barWidth = barWidth
         self.barColor = barColor
+        self.textColor = textColor
     }
 
     var resolvedBarOffset: CGFloat { barOffset ?? indentPerLevel * 0.25 }
     var resolvedTextOffset: CGFloat { textOffset ?? indentPerLevel * 0.5 }
+    func resolvedTextColor(_ theme: MarkdownEditorTheme) -> NSColor { textColor ?? theme.mutedText }
 
     public static let `default` = BlockquoteStyle()
 }

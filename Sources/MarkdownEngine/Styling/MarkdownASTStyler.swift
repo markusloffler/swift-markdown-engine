@@ -820,7 +820,7 @@ enum MarkdownASTStyler {
             attrs.append((ctx.ns.paragraphRange(for: tokenRange), [.paragraphStyle: para]))
 
             if contentRange.length > 0 {
-                attrs.append((contentRange, [.foregroundColor: ctx.theme.mutedText]))
+                attrs.append((contentRange, [.foregroundColor: quote.resolvedTextColor(ctx.theme)]))
             }
             if ctx.isActive(tokenRange) {
                 attrs.append((markerRange, [.foregroundColor: ctx.theme.mutedText]))

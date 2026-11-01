@@ -76,7 +76,7 @@ extension MarkdownStyler {
         // Containers that ENCLOSE an in-scope formula must overlap the scope, so
         // scope-slicing these is exact; built once, not per formula.
         let tableRanges = ctx.scoped(ctx.tableIndexed).map { $0.token.range }
-        // Quote lines mute their text via foregroundColor, which the LaTeX *image* ignores — render it in mutedText instead so it matches the grey.
+        // Quote lines mute their text via foregroundColor, which the LaTeX *image* ignores — render it in the quote text color instead so it matches.
         let blockquoteRanges = MarkdownStyler.StylingContext.indexed(ctx.tokens, .blockquote).map { $0.token.range }
         // Built once, not re-scanned per formula (latexFontSize was O(#latex × #tokens)).
         let headings = ctx.scoped(MarkdownStyler.StylingContext.indexed(ctx.tokens, .heading)).map { $0.token }
@@ -113,8 +113,9 @@ extension MarkdownStyler {
             } else {
                 var renderTheme = ctx.configuration.theme
                 if blockquoteRanges.contains(where: { NSLocationInRange(token.range.location, $0) }) {
-                    renderTheme.latexLightModeText = renderTheme.mutedText
-                    renderTheme.latexDarkModeText = renderTheme.mutedText
+                    let quoteText = ctx.configuration.blockquote.resolvedTextColor(renderTheme)
+                    renderTheme.latexLightModeText = quoteText
+                    renderTheme.latexDarkModeText = quoteText
                 }
                 if let entry = ctx.services.latex.render(
                     latex: latexContent,

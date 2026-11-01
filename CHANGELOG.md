@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Opt-in CSS-style rendering options, all off by default: `ParagraphStyle.blankLineHeight`;
   `HeadingStyle` bottom spacing, line-height multiples and rules under chosen levels
-  (`theme.headingRule`), per-level `theme.headingText`; blockquote bar geometry and color;
+  (`theme.headingRule`), per-level `theme.headingText`; blockquote bar geometry, bar and text color;
   thematic-break thickness and color; code-block border and corner radius; boxed inline
   code (`InlineCodeStyle.drawsBox`); `TableStyle` (cell padding, border, header and stripe fills).
 

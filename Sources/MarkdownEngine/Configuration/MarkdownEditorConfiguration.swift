@@ -48,6 +48,10 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var textInsets: TextInsets
     /// Centered reading-column width; wide tables break out to full width. nil = full width (default).
     public var readingWidth: CGFloat?
+    /// Treat `readingWidth` as a maximum (CSS `max-width`): in a narrower
+    /// viewport the column shrinks to fit and the text re-wraps. Off by
+    /// default, where the column keeps its width and overflows.
+    public var readingWidthShrinksToFit: Bool
     /// Whether table images reflow at every width change during live window resize.
     /// Set to false to retain their images while dragging and reflow synchronously
     /// when resizing ends, including any final width delivered by the host afterward.
@@ -95,6 +99,11 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var directives: [any MarkdownDirective]
     /// Marker configuration for ``directives`` (default `@`).
     public var directiveSettings: DirectiveRegistrySettings
+    /// Cell metrics and colors of rendered tables.
+    public var table: TableStyle
+    /// Whether text is drawn with macOS font smoothing (the default). Off
+    /// draws thinner strokes, like CSS `-webkit-font-smoothing: antialiased`.
+    public var smoothsFonts: Bool
 
     public init(
         theme: MarkdownEditorTheme = .default,
@@ -125,7 +134,10 @@ public struct MarkdownEditorConfiguration: Sendable {
         extensions: [any MarkdownExtension] = [],
         cursorFollowsSpanInk: Bool = false,
         directives: [any MarkdownDirective] = [],
-        directiveSettings: DirectiveRegistrySettings = .default
+        directiveSettings: DirectiveRegistrySettings = .default,
+        table: TableStyle = .default,
+        smoothsFonts: Bool = true,
+        readingWidthShrinksToFit: Bool = false
     ) {
         self.theme = theme
         self.services = services
@@ -156,6 +168,9 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.cursorFollowsSpanInk = cursorFollowsSpanInk
         self.directives = directives
         self.directiveSettings = directiveSettings
+        self.table = table
+        self.smoothsFonts = smoothsFonts
+        self.readingWidthShrinksToFit = readingWidthShrinksToFit
     }
 
     public static let `default` = MarkdownEditorConfiguration()
@@ -280,15 +295,31 @@ public struct CodeBlockStyle: Sendable {
     public var paragraphSpacing: CGFloat
     /// Left/right indent (in points) so code blocks don't run into the gutter.
     public var horizontalIndent: CGFloat
+    /// Stroke color of a 1 pt border around the whole block. nil (default)
+    /// draws no border.
+    public var borderColor: NSColor?
+    /// Corner radius of the block's background and border. 0 (default)
+    /// keeps square corners.
+    public var cornerRadius: CGFloat
+    /// Height (points) of the fence lines while they are hidden (caret
+    /// outside the block), so they act as the block's top/bottom padding.
+    /// nil (default) keeps them at code line height.
+    public var hiddenFenceLineHeight: CGFloat?
 
     public init(
         fontSizeScale: CGFloat = 0.85,
         paragraphSpacing: CGFloat = 2.0,
-        horizontalIndent: CGFloat = 12.0
+        horizontalIndent: CGFloat = 12.0,
+        borderColor: NSColor? = nil,
+        cornerRadius: CGFloat = 0,
+        hiddenFenceLineHeight: CGFloat? = nil
     ) {
         self.fontSizeScale = fontSizeScale
         self.paragraphSpacing = paragraphSpacing
         self.horizontalIndent = horizontalIndent
+        self.borderColor = borderColor
+        self.cornerRadius = cornerRadius
+        self.hiddenFenceLineHeight = hiddenFenceLineHeight
     }
 
     public static let `default` = CodeBlockStyle()
@@ -300,9 +331,39 @@ public struct CodeBlockStyle: Sendable {
 public struct InlineCodeStyle: Sendable {
     /// Inline-code reuses the code block font size scale by default.
     public var fontSizeScale: CGFloat
+    /// Draw the span as a box (fill, optional border, rounded corners,
+    /// horizontal padding) instead of AppKit's glyph-box `.backgroundColor`.
+    /// Off by default.
+    public var drawsBox: Bool
+    /// Box fill; nil uses the syntax highlighter's code background. Only with `drawsBox`.
+    public var backgroundColor: NSColor?
+    /// Box border color; nil draws no border. Only with `drawsBox`.
+    public var borderColor: NSColor?
+    /// Box corner radius. Only with `drawsBox`.
+    public var cornerRadius: CGFloat
+    /// Space (points) between the box edge and the code on either side,
+    /// added as kerning so the following text moves with it. Only with `drawsBox`.
+    public var horizontalPadding: CGFloat
+    /// Space (points) the box extends above the code font's ascender and
+    /// below its descender. Only with `drawsBox`.
+    public var verticalPadding: CGFloat
 
-    public init(fontSizeScale: CGFloat = 0.85) {
+    public init(
+        fontSizeScale: CGFloat = 0.85,
+        drawsBox: Bool = false,
+        backgroundColor: NSColor? = nil,
+        borderColor: NSColor? = nil,
+        cornerRadius: CGFloat = 0,
+        horizontalPadding: CGFloat = 0,
+        verticalPadding: CGFloat = 0
+    ) {
         self.fontSizeScale = fontSizeScale
+        self.drawsBox = drawsBox
+        self.backgroundColor = backgroundColor
+        self.borderColor = borderColor
+        self.cornerRadius = cornerRadius
+        self.horizontalPadding = horizontalPadding
+        self.verticalPadding = verticalPadding
     }
 
     public static let `default` = InlineCodeStyle()
@@ -324,19 +385,36 @@ public struct ListStyle: Sendable {
     public var maximumNestingLevel: Int
     /// Extra line height added on top of the default to give list items room.
     public var extraLineHeight: CGFloat
+    /// Minimum width (points) from a marker's start to its item's text.
+    /// A bullet's slot is widened after the marker (space between bullet
+    /// and text); a number's slot before it (numbers end near the text).
+    /// nil (default) uses the marker's natural width. Task items keep theirs.
+    public var markerSlotWidth: CGFloat?
+    /// Draw bullets as a filled disc of this diameter, centered on the
+    /// x-height, instead of a `•` glyph. nil (default) draws the glyph.
+    public var bulletDiameter: CGFloat?
+    /// Space (points) after each list item. nil (default) uses the body
+    /// paragraph spacing.
+    public var itemSpacing: CGFloat?
 
     public init(
         helpersEnabled: Bool = true,
         autoClosePairsEnabled: Bool = true,
         indentPerLevel: CGFloat = 27.5,
         maximumNestingLevel: Int = 3,
-        extraLineHeight: CGFloat = 2
+        extraLineHeight: CGFloat = 2,
+        markerSlotWidth: CGFloat? = nil,
+        bulletDiameter: CGFloat? = nil,
+        itemSpacing: CGFloat? = nil
     ) {
         self.helpersEnabled = helpersEnabled
         self.autoClosePairsEnabled = autoClosePairsEnabled
         self.indentPerLevel = indentPerLevel
         self.maximumNestingLevel = maximumNestingLevel
         self.extraLineHeight = extraLineHeight
+        self.markerSlotWidth = markerSlotWidth
+        self.bulletDiameter = bulletDiameter
+        self.itemSpacing = itemSpacing
     }
 
     public static let `default` = ListStyle()
@@ -432,15 +510,23 @@ public struct ThematicBreakStyle: Sendable {
     public var asteriskMark: Mark?
     /// Centered mark drawn for a `___` break; nil draws the full-width rule.
     public var underscoreMark: Mark?
+    /// Thickness (points) of the full-width rule.
+    public var ruleThickness: CGFloat
+    /// Rule color; nil (default) uses `theme.strikethroughColor` at 40 % alpha.
+    public var ruleColor: NSColor?
 
     public init(
         dashMark: Mark? = nil,
         asteriskMark: Mark? = nil,
-        underscoreMark: Mark? = nil
+        underscoreMark: Mark? = nil,
+        ruleThickness: CGFloat = 1,
+        ruleColor: NSColor? = nil
     ) {
         self.dashMark = dashMark
         self.asteriskMark = asteriskMark
         self.underscoreMark = underscoreMark
+        self.ruleThickness = ruleThickness
+        self.ruleColor = ruleColor
     }
 
     public static let `default` = ThematicBreakStyle()
@@ -470,23 +556,60 @@ public struct HeadingStyle: Sendable {
     public var fontMultipliers: [CGFloat]
     /// Top spacing in `em` units per heading level (1...6).
     public var topSpacingEm: [CGFloat]
+    /// Bottom spacing in `em` units per heading level (1...6). nil (default)
+    /// uses the body paragraph spacing.
+    public var bottomSpacingEm: [CGFloat]?
+    /// Line height as a multiple of the heading font size per level (1...6),
+    /// like CSS `line-height`. nil (default) uses the font's natural line height.
+    public var lineHeightMultiples: [CGFloat]?
+    /// Heading levels drawn with a full-width rule below them (e.g. `[1, 2]`
+    /// for GitHub style). Empty by default. The rule's color is
+    /// `MarkdownEditorTheme.headingRule`.
+    public var ruleLevels: Set<Int>
+    /// Gap between the heading's line box and its rule, in `em` of the
+    /// heading font (CSS `padding-bottom`).
+    public var ruleGapEm: CGFloat
+    /// Rule thickness in points.
+    public var ruleThickness: CGFloat
 
     public init(
         fontMultipliers: [CGFloat] = [2.0, 1.5, 1.17, 1.0, 0.83, 0.67],
-        topSpacingEm: [CGFloat] = [0.35, 0.30, 0.25, 0.20, 0.15, 0.10]
+        topSpacingEm: [CGFloat] = [0.35, 0.30, 0.25, 0.20, 0.15, 0.10],
+        bottomSpacingEm: [CGFloat]? = nil,
+        lineHeightMultiples: [CGFloat]? = nil,
+        ruleLevels: Set<Int> = [],
+        ruleGapEm: CGFloat = 0.3,
+        ruleThickness: CGFloat = 1
     ) {
         self.fontMultipliers = fontMultipliers
         self.topSpacingEm = topSpacingEm
+        self.bottomSpacingEm = bottomSpacingEm
+        self.lineHeightMultiples = lineHeightMultiples
+        self.ruleLevels = ruleLevels
+        self.ruleGapEm = ruleGapEm
+        self.ruleThickness = ruleThickness
     }
 
     public func fontMultiplier(for level: Int) -> CGFloat {
-        let index = max(1, min(level, fontMultipliers.count)) - 1
-        return fontMultipliers[index]
+        Self.value(in: fontMultipliers, for: level) ?? 1
     }
 
     public func topSpacingEm(for level: Int) -> CGFloat {
-        let index = max(1, min(level, topSpacingEm.count)) - 1
-        return topSpacingEm[index]
+        Self.value(in: topSpacingEm, for: level) ?? 0
+    }
+
+    public func bottomSpacingEm(for level: Int) -> CGFloat? {
+        bottomSpacingEm.flatMap { Self.value(in: $0, for: level) }
+    }
+
+    public func lineHeightMultiple(for level: Int) -> CGFloat? {
+        lineHeightMultiples.flatMap { Self.value(in: $0, for: level) }
+    }
+
+    /// Per-level lookup; levels past the array's end reuse its last value.
+    private static func value(in values: [CGFloat], for level: Int) -> CGFloat? {
+        guard !values.isEmpty else { return nil }
+        return values[max(1, min(level, values.count)) - 1]
     }
 
     public static let `default` = HeadingStyle()
@@ -571,10 +694,37 @@ public struct InlineLatexStyle: Sendable {
 public struct BlockquoteStyle: Sendable {
     /// Extra height (points) added to the default line height for blockquote lines.
     public var extraLineHeight: CGFloat
+    /// Horizontal space (points) each nesting level occupies.
+    public var indentPerLevel: CGFloat
+    /// Offset of each level's bar from the start of its level slot.
+    /// nil (default) = a quarter of `indentPerLevel`.
+    public var barOffset: CGFloat?
+    /// Offset of the quote text after the last level slot.
+    /// nil (default) = half of `indentPerLevel`.
+    public var textOffset: CGFloat?
+    /// Bar width in points.
+    public var barWidth: CGFloat
+    /// Bar color; nil (default) uses `theme.mutedText` at 50 % alpha.
+    public var barColor: NSColor?
 
-    public init(extraLineHeight: CGFloat = 0) {
+    public init(
+        extraLineHeight: CGFloat = 0,
+        indentPerLevel: CGFloat = 18,
+        barOffset: CGFloat? = nil,
+        textOffset: CGFloat? = nil,
+        barWidth: CGFloat = 3,
+        barColor: NSColor? = nil
+    ) {
         self.extraLineHeight = extraLineHeight
+        self.indentPerLevel = indentPerLevel
+        self.barOffset = barOffset
+        self.textOffset = textOffset
+        self.barWidth = barWidth
+        self.barColor = barColor
     }
+
+    var resolvedBarOffset: CGFloat { barOffset ?? indentPerLevel * 0.25 }
+    var resolvedTextOffset: CGFloat { textOffset ?? indentPerLevel * 0.5 }
 
     public static let `default` = BlockquoteStyle()
 }
@@ -605,13 +755,52 @@ public struct ParagraphStyle: Sendable {
     public var spacingFactor: CGFloat
     /// Extra height (points) added to the default paragraph line height.
     public var lineHeightExtraSpacing: CGFloat
+    /// Fixed height (points) of a blank line between blocks, so the blank
+    /// line reads as a block margin (CSS `p { margin: 0.8em 0 }`) instead of
+    /// a full body line. nil (default) renders blank lines at body height.
+    /// Only the rendering shrinks; the source keeps its blank lines.
+    public var blankLineHeight: CGFloat?
 
-    public init(spacingFactor: CGFloat = 0.3, lineHeightExtraSpacing: CGFloat = 2) {
+    public init(spacingFactor: CGFloat = 0.3, lineHeightExtraSpacing: CGFloat = 2, blankLineHeight: CGFloat? = nil) {
         self.spacingFactor = spacingFactor
         self.lineHeightExtraSpacing = lineHeightExtraSpacing
+        self.blankLineHeight = blankLineHeight
     }
 
     public static let `default` = ParagraphStyle()
+}
+
+// MARK: - Tables
+
+/// Cell metrics and colors of rendered GFM tables.
+public struct TableStyle: Sendable {
+    /// Space (points) between a cell's border and its text, left and right.
+    public var cellHorizontalPadding: CGFloat
+    /// Space (points) between a cell's border and its text, top and bottom.
+    public var cellVerticalPadding: CGFloat
+    /// Grid color; nil (default) uses `theme.mutedText` at 50 % alpha.
+    public var borderColor: NSColor?
+    /// Header row fill; nil (default) uses `theme.mutedText` at 8 % alpha.
+    public var headerBackground: NSColor?
+    /// Fill of every second body row (CSS `tr:nth-child(2n)`); nil (default)
+    /// leaves body rows unfilled.
+    public var stripeBackground: NSColor?
+
+    public init(
+        cellHorizontalPadding: CGFloat = 12,
+        cellVerticalPadding: CGFloat = 6,
+        borderColor: NSColor? = nil,
+        headerBackground: NSColor? = nil,
+        stripeBackground: NSColor? = nil
+    ) {
+        self.cellHorizontalPadding = cellHorizontalPadding
+        self.cellVerticalPadding = cellVerticalPadding
+        self.borderColor = borderColor
+        self.headerBackground = headerBackground
+        self.stripeBackground = stripeBackground
+    }
+
+    public static let `default` = TableStyle()
 }
 
 // MARK: - Bottom overscroll

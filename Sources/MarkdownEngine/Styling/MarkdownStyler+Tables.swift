@@ -65,7 +65,7 @@ extension MarkdownStyler {
             + "\(ObjectIdentifier(theme.bodyText))|\(ObjectIdentifier(theme.mutedText))|"
             + "\(ObjectIdentifier(theme.highlightColor))|\(ObjectIdentifier(ctx.codeBackgroundColor))|"
             + "\(ObjectIdentifier(theme.latexLightModeText))|\(ObjectIdentifier(theme.latexDarkModeText))|"
-            + "\(ObjectIdentifier(type(of: ctx.services.latex)))"
+            + "\(ObjectIdentifier(type(of: ctx.services.latex)))|" + tableStyleIdentity(ctx.configuration.table)
 
         themeKeyLock.lock()
         if let cached = themeKeyCache[identity] {
@@ -88,6 +88,7 @@ extension MarkdownStyler {
             colorKey(theme.latexLightModeText, under: appearance),
             colorKey(theme.latexDarkModeText, under: appearance),
             "\(ObjectIdentifier(type(of: ctx.services.latex)))",
+            tableStyleKey(ctx.configuration.table, under: appearance),
         ].joined(separator: "|")
 
         themeKeyLock.lock()
@@ -95,6 +96,20 @@ extension MarkdownStyler {
         themeKeyCache[identity] = prefix
         themeKeyLock.unlock()
         return prefix
+    }
+
+    /// Identity of the table style's inputs for the memo above.
+    private static func tableStyleIdentity(_ style: TableStyle) -> String {
+        func id(_ color: NSColor?) -> String { color.map { "\(ObjectIdentifier($0))" } ?? "-" }
+        return "\(style.cellHorizontalPadding)|\(style.cellVerticalPadding)|\(id(style.borderColor))|"
+            + "\(id(style.headerBackground))|\(id(style.stripeBackground))"
+    }
+
+    /// Resolved form of the table style for the image cache key.
+    private static func tableStyleKey(_ style: TableStyle, under appearance: NSAppearance) -> String {
+        func key(_ color: NSColor?) -> String { color.map { colorKey($0, under: appearance) } ?? "-" }
+        return "\(style.cellHorizontalPadding)|\(style.cellVerticalPadding)|\(key(style.borderColor))|"
+            + "\(key(style.headerBackground))|\(key(style.stripeBackground))"
     }
 
     /// Parse + content-hash for a table source, memoized: both are pure in
@@ -160,6 +175,7 @@ extension MarkdownStyler {
             theme: ctx.configuration.theme,
             codeBackgroundColor: ctx.codeBackgroundColor,
             latex: ctx.services.latex,
+            style: ctx.configuration.table,
             appearance: appearance,
             availableWidth: availableWidth,
             extensions: ctx.configuration.extensions
@@ -513,23 +529,28 @@ extension MarkdownStyler {
         theme: MarkdownEditorTheme,
         codeBackgroundColor: NSColor,
         latex: any LatexRenderer,
+        style: TableStyle = .default,
         appearance: NSAppearance,
         availableWidth: CGFloat,
         extensions: [any MarkdownExtension] = []
     ) -> NSImage {
         let columnCount = table.alignments.count
-        let cellHPadding: CGFloat = 12
-        let cellVPadding: CGFloat = 6
+        let cellHPadding = style.cellHorizontalPadding
+        let cellVPadding = style.cellVerticalPadding
         let borderWidth: CGFloat = 1
         // Resolve under the real appearance: `.withAlphaComponent()` freezes a dynamic color otherwise.
-        func mutedColor(alpha: CGFloat) -> NSColor {
-            var resolved: NSColor = theme.mutedText
+        func resolved(_ color: NSColor) -> NSColor {
+            var result = color
             appearance.performAsCurrentDrawingAppearance {
-                resolved = theme.mutedText.usingColorSpace(.sRGB) ?? theme.mutedText
+                result = color.usingColorSpace(.sRGB) ?? color
             }
-            return resolved.withAlphaComponent(alpha)
+            return result
         }
-        let borderColor = mutedColor(alpha: 0.5)
+        func mutedColor(alpha: CGFloat) -> NSColor {
+            resolved(theme.mutedText).withAlphaComponent(alpha)
+        }
+        let borderColor = style.borderColor.map(resolved) ?? mutedColor(alpha: 0.5)
+        let stripeFill = style.stripeBackground.map(resolved)
         let baseLineHeight: CGFloat = ceil(baseFont.ascender - baseFont.descender + baseFont.leading)
         let minColumnContentWidth: CGFloat = 16
 
@@ -669,7 +690,7 @@ extension MarkdownStyler {
         }
 
         let alignments = table.alignments
-        let headerFill = mutedColor(alpha: 0.08)
+        let headerFill = style.headerBackground.map(resolved) ?? mutedColor(alpha: 0.08)
 
         // Flipped image so AppKit handles the y-flip; a manual transform mirror would flip glyphs too.
         return NSImage(size: size, flipped: true) { _ in
@@ -681,6 +702,19 @@ extension MarkdownStyler {
                 width: size.width - 2 * borderWidth,
                 height: rowContentHeights[0] + 2 * cellVPadding
             )).fill()
+
+            // Every second body row (CSS `tr:nth-child(2n)`)
+            if let stripeFill {
+                stripeFill.setFill()
+                for row in stride(from: 2, to: rowCount, by: 2) {
+                    NSBezierPath(rect: NSRect(
+                        x: borderWidth,
+                        y: rowTop[row],
+                        width: size.width - 2 * borderWidth,
+                        height: rowContentHeights[row] + 2 * cellVPadding
+                    )).fill()
+                }
+            }
 
             // Outer border
             borderColor.setStroke()

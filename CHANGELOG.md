@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Opt-in CSS-style rendering options, all off by default: `ParagraphStyle.blankLineHeight`;
+  `HeadingStyle` bottom spacing, line-height multiples and rules under chosen levels
+  (`theme.headingRule`), per-level `theme.headingText`; blockquote bar geometry and color;
+  thematic-break thickness and color; code-block border and corner radius; boxed inline
+  code (`InlineCodeStyle.drawsBox`); `TableStyle` (cell padding, border, header and stripe fills).
+
+### Changed
+- Code-block fragments are identified by a `.codeBlockFill` attribute instead of comparing
+  background colors, so a paragraph starting with inline code no longer gets the block fill.
+
 ## [0.15.0] - 2026-10-22
 
 ### Added

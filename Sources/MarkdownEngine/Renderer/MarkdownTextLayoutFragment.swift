@@ -41,6 +41,15 @@ extension NSAttributedString.Key {
     static let scrollableBlockTotalHeight = NSAttributedString.Key("ScrollableBlockTotalHeight")
     /// NSValue(range:) — full multi-line range of a rendered table, used to scope width-change restyles.
     static let scrollableBlockFullRange = NSAttributedString.Key("ScrollableBlockFullRange")
+    /// Bool — a fenced code block's range; its fragments get the full-width
+    /// fill (and border, when configured). Identifies code blocks without
+    /// comparing background colors, which inline code shares.
+    static let codeBlockFill = NSAttributedString.Key("CodeBlockFill")
+    /// Bool — inline-code content drawn as a box (`InlineCodeStyle.drawsBox`).
+    static let inlineCodeBox = NSAttributedString.Key("InlineCodeBox")
+    /// CGFloat — on a heading paragraph: draw a full-width rule this many
+    /// points below the heading's last line (`HeadingStyle.ruleLevels`).
+    static let headingRule = NSAttributedString.Key("HeadingRule")
 }
 
 public extension NSAttributedString.Key {
@@ -59,11 +68,6 @@ public extension NSAttributedString.Key {
 
 final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
-    /// Horizontal space (points) each blockquote nesting level occupies —
-    /// shared so the styler's text indent and the painted bars line up.
-    static let blockquoteIndentPerLevel: CGFloat = 18
-    static let blockquoteBarWidth: CGFloat = 3
-
     /// Strip below an overlay block for the legacy-small scroller (~11pt) + buffer.
     static let scrollableBlockScrollerStrip: CGFloat = 14
 
@@ -81,7 +85,7 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         var bounds = super.renderingSurfaceBounds
         // Task checkboxes too: the box draws left of the first glyph (marker
         // slot), outside the default text surface — TextKit would clip it.
-        if hasCodeBlockBackground || hasThematicBreak || hasBlockquote || hasTaskCheckbox {
+        if hasCodeBlockBackground || hasThematicBreak || hasBlockquote || hasTaskCheckbox || hasHeadingRule {
             let containerWidth = textLayoutManager?.textContainer?.size.width ?? bounds.width
             // Extend left to container edge
             bounds.origin.x = -layoutFragmentFrame.origin.x
@@ -95,6 +99,14 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         // Line-box fills are taller than the glyphs they sit behind.
         for fill in blockBackgroundFills(at: .zero) {
             bounds = bounds.union(fill.rect)
+        }
+        // Inline-code boxes reach past the glyphs by their padding.
+        for box in inlineCodeBoxRects(at: .zero) {
+            bounds = bounds.union(box.insetBy(dx: -1, dy: -1))
+        }
+        // Heading rules sit in the paragraph spacing below the last line.
+        for rule in headingRuleRects(at: .zero) {
+            bounds = bounds.union(rule)
         }
         return bounds
     }
@@ -114,11 +126,21 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         // 1b. Line-box fills (`==highlight==` and friends), behind text
         drawBlockBackgrounds(at: point, in: context)
 
+        // 1c. Inline-code boxes, behind text
+        drawInlineCodeBoxes(at: point, in: context)
+
         // 2. LaTeX images (behind text — hidden markers are invisible anyway)
         drawLatexImages(at: point, in: context)
 
         // 3. Normal text
-        super.draw(at: point, in: context)
+        if configuration.smoothsFonts {
+            super.draw(at: point, in: context)
+        } else {
+            context.saveGState()
+            context.setShouldSmoothFonts(false)
+            super.draw(at: point, in: context)
+            context.restoreGState()
+        }
 
         // 4. Task checkboxes (on top of hidden [ ]/[x] markers)
         drawTaskCheckboxes(at: point, in: context)
@@ -133,6 +155,9 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
         // 6. Blockquote bars (left gutter, behind nothing — text is indented)
         drawBlockquoteBars(at: point, in: context)
+
+        // 7. Rules under headings (in the paragraph spacing, below the text)
+        drawHeadingRules(at: point, in: context)
     }
 
     // MARK: - Helpers
@@ -148,6 +173,15 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     private var textStorage: NSTextStorage? {
         (textLayoutManager?.textContentManager as? NSTextContentStorage)?.textStorage
+    }
+
+    private var configuration: MarkdownEditorConfiguration {
+        (textLayoutManager?.textContainer?.textView as? NativeTextView)?.configuration ?? .default
+    }
+
+    private var backingScale: CGFloat {
+        textLayoutManager?.textContainer?.textView?.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2.0
     }
 
     /// Returns the drawing position for a character at `docIndex` (document-level NSRange location).
@@ -195,9 +229,12 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     private var hasCodeBlockBackground: Bool {
         guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return false }
-        let bgColor = ts.attribute(.backgroundColor, at: range.location, effectiveRange: nil) as? NSColor
-        guard let bgColor else { return false }
-        return isCodeBlockBackgroundColor(bgColor)
+        return ts.attribute(.codeBlockFill, at: range.location, effectiveRange: nil) as? Bool == true
+    }
+
+    private var hasHeadingRule: Bool {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return false }
+        return ts.attribute(.headingRule, at: range.location, effectiveRange: nil) is CGFloat
     }
 
     private var hasThematicBreak: Bool {
@@ -239,9 +276,17 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     private func drawCodeBlockBackground(at point: CGPoint, in context: CGContext) {
         guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return }
 
-        // Only fenced code-block fragments get the full-width fill (first char must carry the code background).
-        guard let color = ts.attribute(.backgroundColor, at: range.location, effectiveRange: nil) as? NSColor,
-              isCodeBlockBackgroundColor(color) else { return }
+        // Only fenced code-block fragments get the full-width fill (first char must carry the tag).
+        guard ts.attribute(.codeBlockFill, at: range.location, effectiveRange: nil) as? Bool == true,
+              let color = ts.attribute(.backgroundColor, at: range.location, effectiveRange: nil) as? NSColor
+        else { return }
+        let style = configuration.codeBlock
+        // Each line of a block is its own fragment; the first and last one
+        // close the shape (top/bottom border, rounded corners).
+        let isFirst = range.location == 0
+            || ts.attribute(.codeBlockFill, at: range.location - 1, effectiveRange: nil) as? Bool != true
+        let isLast = NSMaxRange(range) >= ts.length
+            || ts.attribute(.codeBlockFill, at: NSMaxRange(range), effectiveRange: nil) as? Bool != true
 
         let containerWidth = textLayoutManager?.textContainer?.size.width ?? layoutFragmentFrame.width
 
@@ -252,8 +297,7 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             effectiveHeight -= lastLF.typographicBounds.height
         }
 
-        let scale = textLayoutManager?.textContainer?.textView?.window?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let scale = backingScale
         let rawY = point.y
         let rawMaxY = point.y + effectiveHeight
         let snappedY = floor(rawY * scale) / scale
@@ -273,18 +317,38 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             height: snappedMaxY - snappedY
         )
 
+        // The block's shape, continued past this fragment's band where the
+        // block goes on, so corners and top/bottom borders only appear at
+        // the block's real ends. Clipped back to the band below.
+        let overhang = style.cornerRadius + 2
+        var shapeRect = bgRect
+        if !isFirst { shapeRect.origin.y -= overhang; shapeRect.size.height += overhang }
+        if !isLast { shapeRect.size.height += overhang }
+        let hasBorder = style.borderColor != nil
+        if hasBorder { shapeRect = shapeRect.insetBy(dx: 0.5, dy: 0) }
+        if hasBorder && isFirst { shapeRect.origin.y += 0.5; shapeRect.size.height -= 0.5 }
+        if hasBorder && isLast { shapeRect.size.height -= 0.5 }
+        let shape = style.cornerRadius > 0
+            ? NSBezierPath(roundedRect: shapeRect, xRadius: style.cornerRadius, yRadius: style.cornerRadius)
+            : NSBezierPath(rect: shapeRect)
+        NSBezierPath(rect: bgRect).setClip()
+
         let selectionRects = selectionRectsInDrawCoordinates(drawPoint: point, snappedY: snappedY, snappedMaxY: snappedMaxY)
         color.setFill()
         if selectionRects.isEmpty {
-            NSBezierPath(rect: bgRect).fill()
+            shape.fill()
         } else {
-            let path = NSBezierPath()
+            let path = shape.copy() as! NSBezierPath
             path.windingRule = .evenOdd
-            path.appendRect(bgRect)
             for r in selectionRects {
                 path.appendRect(r.intersection(bgRect))
             }
             path.fill()
+        }
+        if let border = style.borderColor {
+            border.setStroke()
+            shape.lineWidth = 1
+            shape.stroke()
         }
     }
 
@@ -321,19 +385,6 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             }
         }
         return rects
-    }
-
-    private func isCodeBlockBackgroundColor(_ color: NSColor) -> Bool {
-        let highlighter = (textLayoutManager?.textContainer?.textView as? NativeTextView)?
-            .configuration.services.syntaxHighlighter
-            ?? PlainTextSyntaxHighlighter()
-        let currentBg = highlighter.backgroundColor()
-        guard let colorRGB = color.usingColorSpace(.deviceRGB),
-              let currentBgRGB = currentBg.usingColorSpace(.deviceRGB) else { return false }
-        let tolerance: CGFloat = 0.03
-        return abs(colorRGB.redComponent - currentBgRGB.redComponent) < tolerance &&
-               abs(colorRGB.greenComponent - currentBgRGB.greenComponent) < tolerance &&
-               abs(colorRGB.blueComponent - currentBgRGB.blueComponent) < tolerance
     }
 
     // MARK: - Line-Box Backgrounds
@@ -391,6 +442,106 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             fill.color.setFill()
             NSBezierPath(rect: fill.rect).fill()
         }
+    }
+
+    // MARK: - Inline-Code Boxes
+
+    /// One box per line an `.inlineCodeBox` run touches, relative to `point`:
+    /// the content's glyph span widened by `InlineCodeStyle.horizontalPadding`
+    /// (the styler kerned that much room on both sides), and the code font's
+    /// ascender/descender around the baseline widened by `verticalPadding`.
+    func inlineCodeBoxRects(at point: CGPoint) -> [CGRect] {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return [] }
+        let style = configuration.inlineCode
+        guard style.drawsBox else { return [] }
+        var rects: [CGRect] = []
+        ts.enumerateAttribute(.inlineCodeBox, in: range, options: []) { value, attrRange, _ in
+            guard value as? Bool == true else { return }
+            let font = (ts.attribute(.font, at: attrRange.location, effectiveRange: nil) as? NSFont)
+                ?? NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            let local = NSRange(location: attrRange.location - range.location, length: attrRange.length)
+            for lineFragment in textLineFragments {
+                let lineRange = lineFragment.characterRange
+                let hit = NSIntersectionRange(lineRange, local)
+                guard hit.length > 0 else { continue }
+                let tb = lineFragment.typographicBounds
+                let startX = lineFragment.locationForCharacter(at: hit.location).x
+                let reachesLineEnd = NSMaxRange(hit) >= NSMaxRange(lineRange)
+                let endX = reachesLineEnd
+                    ? tb.width
+                    : lineFragment.locationForCharacter(at: NSMaxRange(hit)).x
+                guard endX > startX else { continue }
+                let baselineY = point.y + tb.origin.y + lineFragment.locationForCharacter(at: hit.location).y
+                let isRunStart = hit.location == local.location
+                let isRunEnd = NSMaxRange(hit) == NSMaxRange(local)
+                // The trailing kern already sits inside [startX, endX); only
+                // the leading pad lies before the content's first glyph.
+                let left = point.x + tb.origin.x + startX - (isRunStart ? style.horizontalPadding : 0)
+                let right = point.x + tb.origin.x + endX + (isRunEnd ? 0 : style.horizontalPadding)
+                let top = baselineY - font.ascender - style.verticalPadding
+                let bottom = baselineY - font.descender + style.verticalPadding
+                rects.append(CGRect(x: left, y: top, width: right - left, height: bottom - top))
+            }
+        }
+        return rects
+    }
+
+    private func drawInlineCodeBoxes(at point: CGPoint, in context: CGContext) {
+        let rects = inlineCodeBoxRects(at: point)
+        guard !rects.isEmpty else { return }
+        let style = configuration.inlineCode
+        let fill = style.backgroundColor ?? configuration.services.syntaxHighlighter.backgroundColor()
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+
+        let selection = selectionRectsInDrawCoordinates(drawPoint: point, snappedY: point.y,
+                                                        snappedMaxY: point.y + layoutFragmentFrame.height)
+        for rect in rects {
+            let inset = style.borderColor == nil ? rect : rect.insetBy(dx: 0.5, dy: 0.5)
+            let shape = NSBezierPath(roundedRect: inset, xRadius: style.cornerRadius, yRadius: style.cornerRadius)
+            // Leave the selection highlight visible through the fill.
+            let filled = shape.copy() as! NSBezierPath
+            filled.windingRule = .evenOdd
+            for cut in selection where cut.intersects(inset) {
+                filled.appendRect(cut.intersection(inset))
+            }
+            fill.setFill()
+            filled.fill()
+            if let border = style.borderColor {
+                border.setStroke()
+                shape.lineWidth = 1
+                shape.stroke()
+            }
+        }
+    }
+
+    // MARK: - Heading Rules
+
+    /// Full-width rule below every heading line fragment block that carries
+    /// `.headingRule` (the value is the gap below the last line).
+    func headingRuleRects(at point: CGPoint) -> [CGRect] {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0,
+              let gap = ts.attribute(.headingRule, at: range.location, effectiveRange: nil) as? CGFloat,
+              let lastLine = textLineFragments.last(where: { $0.characterRange.length > 0 })
+                ?? textLineFragments.last
+        else { return [] }
+        let containerWidth = textLayoutManager?.textContainer?.size.width ?? layoutFragmentFrame.width
+        let thickness = configuration.headings.ruleThickness
+        let scale = backingScale
+        let y = (ceil((point.y + lastLine.typographicBounds.maxY + gap) * scale)) / scale
+        return [CGRect(x: point.x - layoutFragmentFrame.origin.x, y: y, width: containerWidth, height: thickness)]
+    }
+
+    private func drawHeadingRules(at point: CGPoint, in context: CGContext) {
+        let rects = headingRuleRects(at: point)
+        guard !rects.isEmpty else { return }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        configuration.theme.headingRule.setFill()
+        for rect in rects { NSBezierPath(rect: rect).fill() }
     }
 
     // MARK: - LaTeX / Block Image Helpers
@@ -599,11 +750,12 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             } else {
                 // tb.origin.y is already relative to this layout fragment.
                 let centerY = point.y + tb.origin.y + tb.height / 2
+                let thickness = configuration.thematicBreak.ruleThickness
                 out.append(ThematicBreakDecoration(
-                    rect: CGRect(x: containerX, y: centerY - 0.5, width: containerWidth, height: 1),
+                    rect: CGRect(x: containerX, y: centerY - thickness / 2, width: containerWidth, height: thickness),
                     mark: nil,
                     font: font,
-                    drawOrigin: CGPoint(x: containerX, y: centerY - 0.5)
+                    drawOrigin: CGPoint(x: containerX, y: centerY - thickness / 2)
                 ))
             }
         }
@@ -624,7 +776,7 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         let nsContext = NSGraphicsContext(cgContext: context, flipped: true)
         NSGraphicsContext.current = nsContext
 
-        let ruleColor = theme.strikethroughColor.withAlphaComponent(0.4)
+        let ruleColor = configuration.thematicBreak.ruleColor ?? theme.strikethroughColor.withAlphaComponent(0.4)
         for decoration in decorations {
             guard let mark = decoration.mark else {
                 ruleColor.setFill()
@@ -654,16 +806,13 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         }
         guard anyLevel else { return }
 
-        let theme = (textLayoutManager?.textContainer?.textView as? NativeTextView)?
-            .configuration.theme ?? .default
-        let indentPerLevel = Self.blockquoteIndentPerLevel
-        let barWidth = Self.blockquoteBarWidth
+        let quote = configuration.blockquote
 
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         let nsContext = NSGraphicsContext(cgContext: context, flipped: true)
         NSGraphicsContext.current = nsContext
-        theme.mutedText.withAlphaComponent(0.5).setFill()
+        (quote.barColor ?? configuration.theme.mutedText.withAlphaComponent(0.5)).setFill()
 
         let fragLocation = fragmentNSRange?.location ?? 0
         let leftEdge = point.x - layoutFragmentFrame.origin.x
@@ -679,9 +828,9 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
                 // tb.origin.y is already relative to this layout fragment.
                 let barY = point.y + tb.origin.y
                 for i in 0..<level {
-                    let barX = leftEdge + CGFloat(i) * indentPerLevel + indentPerLevel * 0.25
+                    let barX = leftEdge + CGFloat(i) * quote.indentPerLevel + quote.resolvedBarOffset
                     NSBezierPath(rect: CGRect(
-                        x: barX, y: barY, width: barWidth, height: tb.height
+                        x: barX, y: barY, width: quote.barWidth, height: tb.height
                     )).fill()
                 }
             }
@@ -725,6 +874,14 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             // selection-skip here drew nothing over the cleared char, which left
             // an empty slot wherever the selection anchor wasn't in the marker.)
             let isSelected = selectionRanges.contains(where: { NSIntersectionRange($0, attrRange).length > 0 })
+            if !isSelected, let diameter = self.configuration.lists.bulletDiameter {
+                // A disc at the marker's start, centered on the x-height.
+                let centerY = pos.baselineY - font.xHeight / 2
+                theme.bodyText.setFill()
+                NSBezierPath(ovalIn: CGRect(x: pos.x, y: centerY - diameter / 2,
+                                            width: diameter, height: diameter)).fill()
+                return
+            }
             let raw = storageString.substring(with: attrRange)
             let glyph = (isSelected ? raw : "•") as NSString
             let glyphAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: theme.bodyText]

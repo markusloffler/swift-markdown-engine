@@ -185,9 +185,23 @@ extension NativeTextView {
         return max(ceil(rawHeight + (textContainerInset.height * 2)), minimumContentHeight)
     }
 
-    /// Fixed reading-column width = wrap width + horizontal insets on both sides.
+    /// Reading-column width = wrap width + horizontal insets on both sides;
+    /// capped at the viewport width with `readingWidthShrinksToFit`.
     var readingColumnWidth: CGFloat {
-        (configuration.readingWidth ?? 0) + configuration.textInsets.horizontal * 2
+        let full = (configuration.readingWidth ?? 0) + configuration.textInsets.horizontal * 2
+        guard configuration.readingWidthShrinksToFit,
+              let clipWidth = enclosingScrollView?.contentView.bounds.width, clipWidth > 0 else { return full }
+        return min(full, clipWidth)
+    }
+
+    /// With `readingWidthShrinksToFit`, re-fit the wrap width to the current
+    /// column width. Returns whether it changed.
+    private func refitReadingColumnWrapWidth() -> Bool {
+        guard configuration.readingWidthShrinksToFit, let textContainer else { return false }
+        let wrapWidth = max(readingColumnWidth - configuration.textInsets.horizontal * 2, 40)
+        guard abs(textContainer.size.width - wrapWidth) > 0.5 else { return false }
+        textContainer.size = NSSize(width: wrapWidth, height: .greatestFiniteMagnitude)
+        return true
     }
 
     func applyManagedFrameSize(width: CGFloat) {
@@ -236,6 +250,11 @@ extension NativeTextView {
             var f = container.frame
             f.size.width = max(clipWidth, 0)
             container.frame = f
+        }
+        if refitReadingColumnWrapWidth(), let scrollView = enclosingScrollView {
+            // Re-wrapped: the height changes and the frame takes the new width.
+            recalcOverscroll(for: scrollView)
+            applyManagedFrameSize(width: readingColumnWidth)
         }
         let originX = floor(max(0, (clipWidth - readingColumnWidth) / 2))
         let delta = originX - container.columnOriginX

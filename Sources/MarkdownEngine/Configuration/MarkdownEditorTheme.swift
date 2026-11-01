@@ -79,6 +79,14 @@ public struct MarkdownEditorTheme: Sendable {
     /// Background color used for `==highlight==` inline markup.
     public var highlightColor: NSColor
 
+    // MARK: Headings
+
+    /// Text color per heading level (1...6), e.g. `[6: .secondaryLabelColor]`.
+    /// Levels without an entry use `bodyText`.
+    public var headingText: [Int: NSColor]
+    /// Color of the rule drawn under the levels in `HeadingStyle.ruleLevels`.
+    public var headingRule: NSColor
+
     // MARK: Init
 
     public init(
@@ -93,7 +101,9 @@ public struct MarkdownEditorTheme: Sendable {
         latexLightModeText: NSColor = .black,
         latexDarkModeText: NSColor = .white,
         strikethroughColor: NSColor = .labelColor,
-        highlightColor: NSColor = .systemOrange.withAlphaComponent(0.4)
+        highlightColor: NSColor = .systemOrange.withAlphaComponent(0.4),
+        headingText: [Int: NSColor] = [:],
+        headingRule: NSColor = .separatorColor
     ) {
         self.bodyText = bodyText
         self.mutedText = mutedText
@@ -107,6 +117,8 @@ public struct MarkdownEditorTheme: Sendable {
         self.latexDarkModeText = latexDarkModeText
         self.strikethroughColor = strikethroughColor
         self.highlightColor = highlightColor
+        self.headingText = headingText
+        self.headingRule = headingRule
     }
 
     /// System-native palette built from `NSColor` dynamic system colors.

@@ -390,6 +390,9 @@ public struct ListStyle: Sendable {
     /// and text); a number's slot before it (numbers end near the text).
     /// nil (default) uses the marker's natural width. Task items keep theirs.
     public var markerSlotWidth: CGFloat?
+    /// How far (points) a nested item's marker sits right of its parent's
+    /// text. nil (default) = half of `indentPerLevel`.
+    public var nestedMarkerInset: CGFloat?
     /// Draw bullets as a filled disc of this diameter, centered on the
     /// x-height, instead of a `•` glyph. nil (default) draws the glyph.
     public var bulletDiameter: CGFloat?
@@ -404,6 +407,7 @@ public struct ListStyle: Sendable {
         maximumNestingLevel: Int = 3,
         extraLineHeight: CGFloat = 2,
         markerSlotWidth: CGFloat? = nil,
+        nestedMarkerInset: CGFloat? = nil,
         bulletDiameter: CGFloat? = nil,
         itemSpacing: CGFloat? = nil
     ) {
@@ -413,9 +417,13 @@ public struct ListStyle: Sendable {
         self.maximumNestingLevel = maximumNestingLevel
         self.extraLineHeight = extraLineHeight
         self.markerSlotWidth = markerSlotWidth
+        self.nestedMarkerInset = nestedMarkerInset
         self.bulletDiameter = bulletDiameter
         self.itemSpacing = itemSpacing
     }
+
+    /// Resolved `nestedMarkerInset`.
+    var resolvedNestedMarkerInset: CGFloat { nestedMarkerInset ?? indentPerLevel / 2 }
 
     public static let `default` = ListStyle()
 }

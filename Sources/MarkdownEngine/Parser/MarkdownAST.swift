@@ -312,7 +312,7 @@ enum DocumentAST {
     }
 
     /// Parse one list-item line: indent, marker, optional task checkbox, inline content.
-    private static func listItem(_ lineRange: NSRange, _ ns: NSString, scoped: Bool = true, registry: ExtensionRegistry = .empty) -> ListItem {
+    static func listItem(_ lineRange: NSRange, _ ns: NSString, scoped: Bool = true, registry: ExtensionRegistry = .empty) -> ListItem {
         let end = NSMaxRange(lineRange)
         var i = lineRange.location
         var indent = 0

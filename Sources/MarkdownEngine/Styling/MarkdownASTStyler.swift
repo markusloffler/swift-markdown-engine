@@ -267,7 +267,12 @@ enum MarkdownASTStyler {
                 scan = lineRange.location                    // blank line: loose-list spacing
                 continue
             }
-            guard let m = seedOrderedLineRegex.firstMatch(in: line as String, range: full) else { break }
+            guard let m = seedOrderedLineRegex.firstMatch(in: line as String, range: full) else {
+                // An indented line continues an item above; only flush-left prose ends the run.
+                guard let first = (line as String).first, first == " " || first == "\t" else { break }
+                scan = lineRange.location
+                continue
+            }
             let ws = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: line as String, range: full)
                 .map { line.substring(with: $0.range) } ?? ""
             let number = m.range(at: 2).location != NSNotFound ? Int(line.substring(with: m.range(at: 2))) : nil
@@ -356,6 +361,10 @@ enum MarkdownASTStyler {
                 break                     // blank lines keep the count (spacing, not a reset)
             case .paragraph(_, let inlines) where inlines.isEmpty:
                 break                     // an empty paragraph line is spacing too
+            case .paragraph(let range, _)
+                where ListNesting.owner(ofLineAt: ns.lineRange(for: NSRange(location: range.location, length: 0)),
+                                        in: ns) != nil:
+                break                     // an item's continuation paragraph stays inside the list
             default:
                 counters = [:]            // real text/content ends the run
                 needsSeed = false         // a seed scan would stop on this line anyway
@@ -385,8 +394,6 @@ enum MarkdownASTStyler {
         }
 
         // 1. Indent paragraph style (hanging indent so wrapped lines align).
-        let wsRange = NSRange(location: item.range.location, length: item.marker.location - item.range.location)
-        let ws = ctx.ns.substring(with: wsRange)
         // Revealed while the caret edits the syntax (same test as the early
         // return below): the raw `- [ ]` stays at full advance.
         let taskRevealed: Bool = {
@@ -400,41 +407,11 @@ enum MarkdownASTStyler {
         // Hidden task item shares the bullet geometry: `[ ] ` collapses to ~zero
         // advance below, so the hanging indent measures only `- ` and task
         // content aligns with bullet content (the box replaces the bullet slot).
-        let markerGroup: NSRange
-        if let box = item.checkbox, !taskRevealed {
-            markerGroup = NSRange(location: item.marker.location,
-                                  length: box.location - item.marker.location)
-        } else {
-            markerGroup = NSRange(location: item.marker.location,
-                                  length: item.contentRange.location - item.marker.location)
-        }
-        // An ordered item whose displayed number differs from its source digit
-        // gets its WHOLE marker overlaid (below); the hanging indent must then
-        // measure the DISPLAY marker so wrapped lines align at any digit count.
-        // Off for tasks (the checkbox branch owns those).
-        //
-        // Neither the caret nor a selection takes the overlay down. Every other
-        // markdown construct reveals its source under one, but an ordered
-        // marker's source digit is the one thing the reader never authored: it
-        // is positional, and a run written `1./1./1.` would flip a number back
-        // to `1.` on a plain click or a ⌘A. The digits stay hidden and the
-        // painter keeps drawing the display number under the selection
-        // highlight, which is sized to the same kerned slot.
-        let orderedOverlayActive = item.ordered && item.checkbox == nil && item.number != nil
-            && displayNumber != nil && displayNumber != item.number
-        // Keep the source punctuation (`.` or `)`) when overlaying, so a paren list stays a paren list.
-        let orderedPunct = orderedOverlayActive && item.marker.length > 0
-            ? ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker) - 1, length: 1)) : "."
-        // Via the memoized measure — list markers are a tiny repeated set (`- `, `1. `).
-        let markerWidth: CGFloat = {
-            if orderedOverlayActive, let displayNumber {
-                let gap = ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker),
-                                                         length: item.contentRange.location - NSMaxRange(item.marker)))
-                return HeadingHelpers.textWidth("\(displayNumber)\(orderedPunct)" + gap, font: ctx.baseFont)
-            }
-            return HeadingHelpers.textWidth(ctx.ns.substring(with: markerGroup), font: ctx.baseFont)
-        }()
-        let depthIndent = CGFloat(MarkdownLists.indentLevel(from: ws)) * ctx.config.lists.indentPerLevel
+        let slot = markerSlot(item, displayNumber: displayNumber, taskRevealed: taskRevealed, ctx: ctx)
+        let markerGroup = slot.group
+        let markerWidth = slot.width
+        let orderedOverlayActive = slot.overlay
+        let orderedPunct = slot.punct
         let ps = NSMutableParagraphStyle()
         guard helpers else {
             // Helpers off means NO list indent — but the box is drawn to the
@@ -476,11 +453,13 @@ enum MarkdownASTStyler {
         ps.paragraphSpacingBefore = 0
         ps.tabStops = []
         ps.defaultTabInterval = ctx.config.lists.indentPerLevel
-        ps.firstLineHeadIndent = ctx.config.lists.indentPerLevel
+        // The marker starts at the parent's content x; the source indentation
+        // is visible text, so the first line is pulled left by its width.
+        let geometry = markerGeometry(item, ctx: ctx)
+        ps.firstLineHeadIndent = max(0, geometry.x - geometry.indentWidth)
         // Widen a short marker slot: bullets after the marker (kern on the
         // gap), numbers before it (first-line indent).
-        let slotExtra = item.checkbox == nil
-            ? max(0, (ctx.config.lists.markerSlotWidth ?? 0) - markerWidth) : 0
+        let slotExtra = slot.extra
         if slotExtra > 0 {
             if item.ordered {
                 ps.firstLineHeadIndent += slotExtra
@@ -493,7 +472,7 @@ enum MarkdownASTStyler {
         // doesn't change text advance, so adding it here (and only here, not to
         // firstLineHeadIndent) shifted an unchecked task's wrapped lines right
         // of its first line.
-        ps.headIndent = ctx.config.lists.indentPerLevel + depthIndent + markerWidth + slotExtra
+        ps.headIndent = geometry.x + markerWidth + slotExtra
         attrs.append((line, [.paragraphStyle: ps]))
 
         // 2. Marker decoration (suppressed while the caret edits the syntax).
@@ -536,6 +515,117 @@ enum MarkdownASTStyler {
                 markerAttrs[.kern] = (displayW - hiddenW) / CGFloat(max(1, item.marker.length))
             }
             attrs.append((item.marker, markerAttrs))
+        }
+    }
+
+    /// The measured marker slot of an item: the marker run its hanging indent
+    /// measures, that run's width as drawn, and how much a configured
+    /// `markerSlotWidth` widens it.
+    private struct MarkerSlot {
+        let group: NSRange
+        let width: CGFloat
+        let extra: CGFloat
+        let overlay: Bool
+        let punct: String
+    }
+
+    private static func markerSlot(_ item: ListItem, displayNumber: Int?, taskRevealed: Bool, ctx: Ctx) -> MarkerSlot {
+        let group: NSRange
+        if let box = item.checkbox, !taskRevealed {
+            group = NSRange(location: item.marker.location,
+                            length: box.location - item.marker.location)
+        } else {
+            group = NSRange(location: item.marker.location,
+                            length: item.contentRange.location - item.marker.location)
+        }
+        // An ordered item whose displayed number differs from its source digit
+        // gets its WHOLE marker overlaid; the hanging indent must then
+        // measure the DISPLAY marker so wrapped lines align at any digit count.
+        // Off for tasks (the checkbox branch owns those).
+        //
+        // Neither the caret nor a selection takes the overlay down. Every other
+        // markdown construct reveals its source under one, but an ordered
+        // marker's source digit is the one thing the reader never authored: it
+        // is positional, and a run written `1./1./1.` would flip a number back
+        // to `1.` on a plain click or a ⌘A. The digits stay hidden and the
+        // painter keeps drawing the display number under the selection
+        // highlight, which is sized to the same kerned slot.
+        let overlay = item.ordered && item.checkbox == nil && item.number != nil
+            && displayNumber != nil && displayNumber != item.number
+        // Keep the source punctuation (`.` or `)`) when overlaying, so a paren list stays a paren list.
+        let punct = overlay && item.marker.length > 0
+            ? ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker) - 1, length: 1)) : "."
+        // Via the memoized measure — list markers are a tiny repeated set (`- `, `1. `).
+        let width: CGFloat
+        if overlay, let displayNumber {
+            let gap = ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker),
+                                                     length: item.contentRange.location - NSMaxRange(item.marker)))
+            width = HeadingHelpers.textWidth("\(displayNumber)\(punct)" + gap, font: ctx.baseFont)
+        } else {
+            width = HeadingHelpers.textWidth(ctx.ns.substring(with: group), font: ctx.baseFont)
+        }
+        let extra = item.checkbox == nil ? max(0, (ctx.config.lists.markerSlotWidth ?? 0) - width) : 0
+        return MarkerSlot(group: group, width: width, extra: extra, overlay: overlay, punct: punct)
+    }
+
+    /// Where an item's marker starts, and the drawn width of its source
+    /// indentation. A nested marker starts `nestedMarkerInset` right of its
+    /// parent's content x (so a nested list hangs under the text it belongs
+    /// to); a top-level marker at `indentPerLevel`. Tab indentation keeps the
+    /// level-based geometry, its tab stops already place the marker.
+    private static func markerGeometry(_ item: ListItem, ctx: Ctx) -> (x: CGFloat, indentWidth: CGFloat) {
+        let perLevel = ctx.config.lists.indentPerLevel
+        guard item.indent > 0 else { return (perLevel, 0) }
+        let ws = ctx.ns.substring(with: NSRange(location: item.range.location,
+                                                length: item.marker.location - item.range.location))
+        let levelX = perLevel + CGFloat(MarkdownLists.indentLevel(from: ws)) * perLevel
+        guard !ws.contains("\t") else { return (levelX, levelX - perLevel) }
+        let indentWidth = HeadingHelpers.textWidth(ws, font: ctx.baseFont)
+        guard let parent = ListNesting.parent(of: ListNesting.itemLine(item), in: ctx.ns) else {
+            return (levelX, indentWidth)
+        }
+        let parentX = contentX(DocumentAST.listItem(parent.range, ctx.ns, scoped: false), ctx: ctx)
+        return (parentX + ctx.config.lists.resolvedNestedMarkerInset, indentWidth)
+    }
+
+    /// Where an item's content (and its wrapped lines) start.
+    private static func contentX(_ item: ListItem, ctx: Ctx) -> CGFloat {
+        let slot = markerSlot(item, displayNumber: ctx.orderedDisplayNumbers[item.marker.location],
+                              taskRevealed: false, ctx: ctx)
+        return markerGeometry(item, ctx: ctx).x + slot.width + slot.extra
+    }
+
+    /// Paragraph lines that continue a list item (an indented paragraph after
+    /// a blank line, or a lazy line right below the item) hang under the
+    /// item's content, with the item's line metrics. Their source indentation
+    /// stays visible text, so the first line is pulled left by its width.
+    private static func styleListContinuation(_ range: NSRange, ctx: Ctx, into attrs: inout [StyledRange]) {
+        guard ctx.config.lists.helpersEnabled, range.length > 0 else { return }
+        let firstLine = ctx.ns.lineRange(for: NSRange(location: range.location, length: 0))
+        guard let owner = ListNesting.owner(ofLineAt: firstLine, in: ctx.ns) else { return }
+        let contentX = contentX(DocumentAST.listItem(owner.range, ctx.ns, scoped: false), ctx: ctx)
+        let lists = ctx.config.lists
+        let lineHeight = ctx.baseLineHeight + lists.extraLineHeight
+        var lineStart = range.location
+        while lineStart < NSMaxRange(range) {
+            let line = ctx.ns.lineRange(for: NSRange(location: lineStart, length: 0))
+            lineStart = NSMaxRange(line)
+            var wsEnd = line.location
+            while wsEnd < lineStart, ctx.ns.character(at: wsEnd) == 0x20 || ctx.ns.character(at: wsEnd) == 0x09 {
+                wsEnd += 1
+            }
+            let ws = ctx.ns.substring(with: NSRange(location: line.location, length: wsEnd - line.location))
+            let ps = NSMutableParagraphStyle()
+            ps.minimumLineHeight = lineHeight
+            ps.maximumLineHeight = lineHeight
+            ps.lineSpacing = 0
+            ps.paragraphSpacing = lists.itemSpacing ?? ctx.baseParagraphSpacing
+            ps.paragraphSpacingBefore = 0
+            ps.tabStops = []
+            ps.defaultTabInterval = lists.indentPerLevel
+            ps.firstLineHeadIndent = max(0, contentX - HeadingHelpers.textWidth(ws, font: ctx.baseFont))
+            ps.headIndent = contentX
+            attrs.append((line, [.paragraphStyle: ps]))
         }
     }
 
@@ -673,7 +763,8 @@ enum MarkdownASTStyler {
 
     private static func styleBlock(_ block: BlockNode, font: NSFont, ctx: Ctx, into attrs: inout [StyledRange]) {
         switch block {
-        case .paragraph(_, let inlines):
+        case .paragraph(let range, let inlines):
+            styleListContinuation(range, ctx: ctx, into: &attrs)
             styleInlines(inlines, font: font, ctx: ctx, into: &attrs)
 
         case .heading(let level, let range, let markers, let inlines):
